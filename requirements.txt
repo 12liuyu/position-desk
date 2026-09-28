@@ -1,0 +1,2 @@
+# No third-party Python runtime dependencies.
+# Python 3.11+ with Tkinter is required; Tkinter is not installed from PyPI.

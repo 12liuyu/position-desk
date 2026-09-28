@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "demo": true,
+  "demo_clock": "2030-01-02T16:00:00+08:00",
+  "captured_at": "2030-01-02T15:10:00+08:00",
+  "session_open": false,
+  "reference_date": "2030-01-02",
+  "target_date": "2030-01-03",
+  "total_assets": 10000.0,
+  "available_funds": 4900.0,
+  "market_value": 5100.0,
+  "stocks": [{
+    "code": "DEMO01",
+    "name": "示例股份（虚构）",
+    "quantity": 200,
+    "sellable_quantity": 200,
+    "cost_price": 25.0,
+    "current_price": 25.5,
+    "market_value": 5100.0,
+    "stop_loss_pct": 3.0,
+    "price_tick": 0.01,
+    "reference_close": 25.5,
+    "quote": {"code": "DEMO01", "name": "示例股份（虚构）", "price": 25.5, "at": "2030-01-02T16:00:00+08:00"}
+  }],
+  "plan": {
+    "asof_date": "2030-01-02",
+    "trade_date": "2030-01-03",
+    "stocks": {
+      "DEMO01": {
+        "name": "示例股份（虚构）",
+        "quantity": 200,
+        "cost_price": 25.0,
+        "stop_loss_pct": 3.0,
+        "conclusion": "这是手工编写的虚构条件卡，只展示软件如何呈现数字和预案，不是投资建议。",
+        "price_levels": ["24.25", "25.50", "26.00", "27.00"],
+        "facts": ["名称、数量、价格、日期和情景均为虚构。", "提醒比例由输入文件显式指定，并非通用推荐值。"],
+        "unknowns": ["软件不判断量能、均价线或突破是否成立。", "不包含盘中行情连接、AI分析或动态止损。"],
+        "sources": ["项目随附的 examples/demo.json；不对应真实账户或证券。"],
+        "scenarios": [
+          {
+            "title": "触及提醒线", "short_title": "提醒线", "tone": "risk",
+            "trigger": "示例价格不高于24.25，且确认可卖数量；这是输入规则，不是成交保证。",
+            "action": "示例：核对可卖数量后处理200股。软件不提交交易。",
+            "reason": "演示按成本25.00和自定3%比例计算的提醒线；手续费与跳空未纳入。",
+            "quick_view": {"action": "核对可卖 · 处理200股", "conditions": ["现价 ≤ 24.25", "实际账户可卖 ≥ 200股"], "otherwise": "可卖不足 → 先核对账户；不自动下单"}
+          },
+          {
+            "title": "高开后回落", "short_title": "高开回落", "tone": "risk",
+            "trigger": "虚构情景：高于25.50开盘，在26.00附近受阻，反抽失败且跌回均价线下；这些条件须人工核实。",
+            "action": "示例：条件全部成立且可卖足够时减100股。站稳26.00则切换走强预案。",
+            "reason": "仅展示组合条件，不代表软件已识别实际分时走势。",
+            "quick_view": {"action": "受阻减100股", "conditions": ["开盘 > 25.50；实际可卖 ≥ 100股", "26.00受阻 + 反抽失败", "跌回分时均价线下（人工确认）"], "otherwise": "站稳26.00 → 查看走强预案"}
+          },
+          {
+            "title": "突破后走强", "short_title": "突破走强", "tone": "positive",
+            "trigger": "虚构情景：突破26.00并回踩守住，保持均价线上，人工确认承接有效。",
+            "action": "示例：不卖出，跟踪27.00的承接；重新跌回26.00以下则重评。",
+            "reason": "不机械地把高开等同于卖出；示例条件不代表真实证券走势。",
+            "quick_view": {"action": "承接成立 · 暂不卖", "conditions": ["突破26.00 + 回踩守住", "保持均价线上（人工确认）"], "otherwise": "到27.00复核承接；失守26.00重新评估"}
+          },
+          {
+            "title": "低开后修复", "short_title": "低开修复", "tone": "watch",
+            "trigger": "虚构情景：开盘介于24.25与25.50之间，未触及提醒线，随后收回25.50。",
+            "action": "示例：不补仓，先确认25.50的修复是否成立。",
+            "reason": "显示边界条件与后续分支，不提供固定话术式预测。",
+            "quick_view": {"action": "不补仓 · 先核对修复", "conditions": ["24.25 < 开盘 < 25.50", "未触线 + 重新站上25.50"], "otherwise": "未收回25.50 → 重新评估；触线优先"}
+          }
+        ]
+      }
+    }
+  }
+}
