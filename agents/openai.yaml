@@ -1,0 +1,4 @@
+interface:
+  display_name: "持仓执行卡"
+  short_description: "校验用户提供的持仓数据和已有预案，展示中文执行卡与价位提醒；只读、不下单。"
+  default_prompt: "请用 $position-desk 演示持仓执行卡，明确区分虚构数据、已核对数值和条件预案。"

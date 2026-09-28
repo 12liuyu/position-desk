@@ -1,12 +1,40 @@
 # 持仓执行卡 | Position Desk
 
-一个本地运行的中文桌面工具：把持仓、自定价格提醒线和有日期的操作预案放在同一张卡片上。
+一个本地运行的中文桌面工具与 Agent Skill：把用户提供的持仓、自定价格提醒线和已有操作预案放在同一张卡片上。
 
 **默认只用虚构演示数据，不联网、不连接券商、不下单。基于 MIT 许可证开源。**
 
-项目仓库：[12liuyu/position-desk](https://github.com/12liuyu/position-desk)。当前版本为早期源码版，需要本机安装 Python，不是打包好的 EXE。
+项目仓库：[12liuyu/position-desk](https://github.com/12liuyu/position-desk)。需要本机安装 Python，不是打包好的 EXE。
 
 ![持仓执行卡小窗，全部为虚构演示数据](docs/demo.jpg)
+
+## 安装为 Skill
+
+在准备使用Skill的项目目录运行下面的命令。已验证的Skills CLI版本为1.7.0，需要Node.js 22.20.0或更高版本以及npm；它只将本项目的Skill安装到该项目，不默认全局安装：
+
+```powershell
+npx skills@1.7.0 add 12liuyu/position-desk --skill position-desk --agent codex
+```
+
+Skill安装后仍需Python 3.11+来运行附带脚本。运行环境或组织策略不允许下载第三方CLI时，可改为使用Codex内置安装器：
+
+> 请用 $skill-installer 从 GitHub 的 12liuyu/position-desk 仓库根目录安装 position-desk；路径为 .，安装名称为 position-desk。
+
+随后发送：
+
+> 请用 $position-desk 演示持仓执行卡，只使用虚构数据，不读取我的账户。
+
+或明确提供自己的私人数据目录：
+
+> 请用 $position-desk 校验我指定目录中的 account.json，逐股列出有效预案与缺口，不要改动数据或下单。
+
+支持范围：Codex安装与Python检查入口；其他Agent尚未实测。不将CLI安装成功当成所有模型都会自动选中本Skill。若未被自动识别，直接使用上述 `$position-desk` 调用；必要时按客户端提示刷新技能或重新开始一轮对话。
+
+安装器属于第三方工具，首次运行应审阅安装提示。Skills CLI默认含匿名安装统计，可设置 `DISABLE_TELEMETRY=1` 关闭。应用和检查脚本本身不联网。[安装器文档](https://skills.sh/docs/cli)
+
+## 一分钟上手
+
+[按步骤体验：打开演示、切换情景、查看依据、重读数据](docs/quick-demo.md)。全部使用虚构数据，不需要账户或API Key。这是图文演示，不是视频。
 
 ## 能做什么
 
@@ -30,10 +58,13 @@ Windows 也可双击 `start_demo.cmd`。首次体验只显示 `DEMO01 示例股�
 
 ```powershell
 python -B app.py --demo --check
+python -B scripts/inspect_positions.py --demo --require-plan
 python -B -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 图形测试需要可用桌面，不具备图形环境时不计为图形验收通过。
+
+`scripts/inspect_positions.py` 不导入Tkinter，可在没有桌面的Agent环境中校验并输出JSON；它要求明确指定 `--demo` 或 `--data-dir`，不会把缺失数据当演示。`--require-plan` 对缺失/不匹配预案返回退出码2；错误或陈旧输入返回1。
 
 ## 使用自己的本地数据
 
@@ -67,7 +98,7 @@ python -B app.py --data-dir "D:\PrivatePositionData" --check
 
 ## 开发与发布
 
-代码结构：`app.py` 为窗口；`engine.py` 为数据校验与提醒状态；`planner.py` 为数值计算和预案匹配；`sources.py` 为显式本地数据入口。
+代码结构：`SKILL.md` 为Agent工作流；`scripts/inspect_positions.py` 为无界面入口；`app.py` 为窗口；`engine.py` 为数据校验与提醒状态；`planner.py` 为数值计算和预案匹配；`sources.py` 为显式本地数据入口。仓库根目录就是一个完整、自包含的Skill，无需私有脚本或跨仓库依赖。
 
 `tools/build_release.py` 使用明确文件清单构建 ZIP，不递归打包工作目录，不包含 `.git`、历史提交、账户数据、运行日志或备份。若名单中文件缺失、出现符号链接或典型敏感字段，构建失败。该工具的模式检查只是辅助，公开前仍需人工审查所有代码、图片和许可证。
 

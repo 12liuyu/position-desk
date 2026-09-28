@@ -27,3 +27,7 @@ next_day_plan.json
 *.zip
 *.bak
 *.tmp
+# Agent installation artifacts must not recursively enter the published skill.
+.agents/
+.codex/
+skills-lock.json
