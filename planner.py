@@ -42,7 +42,7 @@ def matching_plan(row, bundle):
                 and number(specific["stop_loss_pct"]) == number(row["stop_loss_pct"])):
             return {}
         scenarios = specific["scenarios"]
-        if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 6:
+        if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 12:
             return {}
         if any(not isinstance(s, dict) or any(not isinstance(s.get(k), str) or not s[k].strip()
                 or len(s[k]) > 3000 for k in ("title", "trigger", "action", "reason")) for s in scenarios):

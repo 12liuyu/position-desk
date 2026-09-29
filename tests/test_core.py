@@ -119,6 +119,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(item["cost_stop"], 24.25)
         self.assertFalse(item["plan_valid"])
 
+    def test_scenario_count_accepts_twelve_but_rejects_overflow_and_duplicate_titles(self):
+        data = demo_data()
+        scenarios = data['plan']['stocks']['DEMO01']['scenarios']
+        template = copy.deepcopy(scenarios[-1])
+        for count in range(8, 14):
+            scenarios.append({**template, 'title': f'fictional scenario {count}'})
+            item = execution_card(data['stocks'][0], data)
+            self.assertEqual(item['plan_valid'], count <= 12)
+        scenarios.pop()
+        scenarios[-1]['title'] = scenarios[0]['title']
+        self.assertFalse(execution_card(data['stocks'][0], data)['plan_valid'])
+
     def test_prices_use_declared_base_and_do_not_double_annotate(self):
         text = annotate_levels("26.00 / 24.25 / 25.50 / 200股", ["26.00", "24.25", "25.50"], 25.5)
         self.assertEqual(text, "26.00(+1.96%) / 24.25(-4.90%) / 25.50(0.00%) / 200股")

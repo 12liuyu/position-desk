@@ -10,11 +10,13 @@ import queue
 import re
 import tempfile
 import threading
+import time
 import tkinter as tk
+from datetime import date, timedelta
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from engine import ReminderBook, now_local
+from engine import ReminderBook, in_session, now_local, stamp
 from sources import FileSource
 from planner import annotate_levels, level_percent
 
@@ -63,9 +65,62 @@ class PercentText(tk.Text):
             self.configure(height=lines)
 
 
+class SlimScroll(tk.Canvas):
+    """A draggable rail that appears only when content overflows."""
+    def __init__(self, parent, target):
+        super().__init__(parent, width=6, bg=PAPER, bd=0, highlightthickness=0)
+        self.target = target
+        self.first, self.last = 0.0, 1.0
+        self.drag_offset = None
+        self.bind("<Configure>", lambda _: self.draw())
+        self.bind("<Button-1>", self.seek)
+        self.bind("<B1-Motion>", self.drag)
+
+    def set(self, first, last):
+        self.first, self.last = float(first), float(last)
+        if self.last - self.first >= .999:
+            self.pack_forget()
+        elif not self.winfo_manager():
+            self.pack(side="right", fill="y", padx=(5, 0))
+        self.draw()
+
+    def thumb_geometry(self):
+        height = max(1, self.winfo_height())
+        span = max(0, min(1, self.last - self.first))
+        size = min(height, max(14, span * height))
+        travel = height - size
+        top = min(1, max(0, self.first / (1-span))) * travel if span < 1 else 0
+        return top, size, travel, 1-span
+
+    def draw(self):
+        self.delete("all")
+        if self.last - self.first < .999:
+            top, size, _, _ = self.thumb_geometry()
+            radius = min(3, size / 2)
+            self.create_line(3, top + radius, 3, top + size - radius, width=4,
+                             fill="#bec7d3", capstyle="round")
+
+    def seek(self, event):
+        top, size, _, _ = self.thumb_geometry()
+        self.drag_offset = event.y - top if top <= event.y <= top + size else size / 2
+        if not top <= event.y <= top + size:
+            self.drag(event)
+
+    def drag(self, event):
+        if self.drag_offset is None:
+            return
+        _, _, travel, maximum = self.thumb_geometry()
+        fraction = (event.y-self.drag_offset) / travel * maximum if travel > 0 else 0
+        self.target.yview_moveto(max(0, min(maximum, fraction)))
+
+
 def quick_view(scenario):
     view = scenario.get("quick_view")
     if not isinstance(view, dict):
+        return None
+    outlook = view.get("outlook")
+    if outlook is not None and (not isinstance(outlook, str) or not outlook.strip()
+                                or len(outlook) > 32 or "\n" in outlook):
         return None
     for key, limit in (("action", 24), ("otherwise", 64)):
         value = view.get(key)
@@ -96,8 +151,11 @@ class PositionDesk:
         self.output = queue.Queue()
         self.busy = self.compact = self.capture_pending = False
         self.capture_message = self.state_error = ""
+        self.health_message = ""
+        self.read_started = None
         self.capture_blocked_version = None
         self.snapshot, self.analyses, self.problems = {}, {}, []
+        self.references = {}
         self.selected = self.popup = None
         self.scenario_selection = {}
         self.scenario_buttons = []
@@ -123,6 +181,7 @@ class PositionDesk:
         root.after(150, self.refresh)
         root.after(200, self.collect)
         root.after(60000, self.poll)
+        root.after(1000, self.health_tick)
 
     def label(self, parent, text="", size=10, color=INK, bold=False, **kw):
         return tk.Label(parent, text=text, bg=kw.pop("bg", parent.cget("bg")), fg=color,
@@ -174,7 +233,7 @@ class PositionDesk:
         self.capture_button = self.button(bottom, "重读数据", self.capture, True)
         self.capture_button.pack(side="left", fill="x", expand=True)
         self.button(bottom, "数据说明", self.show_source).pack(side="left", padx=10)
-        self.button(bottom, "依据 / 设置", self.show_details).pack(side="left")
+        self.button(bottom, "设置", self.show_settings).pack(side="left")
         self.compact_button = self.button(bottom, "小窗", self.toggle_compact)
         self.compact_button.pack(side="left", padx=(10, 0))
         self.body = tk.Frame(self.root, bg=PAPER, padx=24, pady=8)
@@ -218,24 +277,44 @@ class PositionDesk:
         self.conclusion = self.label(self.body, "", 11, INK, True, anchor="w", justify="left", wraplength=710)
         self.operation_heading = tk.Frame(self.body, bg=PAPER)
         self.operation_heading.pack(fill="x", pady=(0, 6))
-        self.label(self.operation_heading, "具体怎么操作", 16, bold=True).pack(side="left")
+        self.label(self.operation_heading, "条件操作预案", 16, bold=True).pack(side="left")
         self.percent_basis = self.label(self.operation_heading, "涨幅基准待核", 9, MUTED)
         self.percent_basis.pack(side="right")
-        # Keep all scenario choices outside the scroll pane, especially in small mode.
-        self.scenario_nav = tk.Frame(self.body, bg=PAPER)
-        self.scenario_nav.pack(fill="x", pady=(0, 10))
-        region = tk.Frame(self.body, bg=PAPER)
-        region.pack(fill="both", expand=True)
+        self.operation_region = tk.Frame(self.body, bg=PAPER)
+        self.operation_region.pack(fill="both", expand=True)
+        self.nav_region = tk.Frame(self.operation_region, bg=PAPER, width=132)
+        self.nav_region.pack(side="left", fill="y", padx=(0, 12))
+        self.nav_region.pack_propagate(False)
+        self.nav_canvas = tk.Canvas(self.nav_region, bg=PAPER, bd=0, highlightthickness=0)
+        self.nav_scrollbar = SlimScroll(self.nav_region, self.nav_canvas)
+        self.nav_canvas.configure(yscrollcommand=self.nav_scrollbar.set)
+        self.nav_canvas.pack(side="left", fill="both", expand=True)
+        self.scenario_nav = tk.Frame(self.nav_canvas, bg=PAPER)
+        self.nav_window = self.nav_canvas.create_window((0, 0), window=self.scenario_nav, anchor="nw")
+        self.scenario_nav.bind("<Configure>", lambda _: self.nav_canvas.configure(scrollregion=self.nav_canvas.bbox("all")))
+        self.nav_canvas.bind("<Configure>", lambda e: self.nav_canvas.itemconfigure(self.nav_window, width=e.width))
+        region = tk.Frame(self.operation_region, bg=PAPER)
+        region.pack(side="left", fill="both", expand=True)
         self.canvas = tk.Canvas(region, bg=PAPER, bd=0, highlightthickness=0)
-        scroll = ttk.Scrollbar(region, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
+        self.scrollbar = SlimScroll(region, self.canvas)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scenarios = tk.Frame(self.canvas, bg=PAPER)
         self.scenario_window = self.canvas.create_window((0, 0), window=self.scenarios, anchor="nw")
         self.scenarios.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", self.resize_cards)
-        self.root.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(-int(event.delta / 120), "units"))
+        self.root.bind("<MouseWheel>", self.scroll_card)
+
+    def scroll_card(self, event):
+        target = self.canvas
+        widget = event.widget
+        while widget is not None:
+            if widget is self.nav_region:
+                target = self.nav_canvas
+                break
+            widget = getattr(widget, "master", None)
+        if target.yview()[1] - target.yview()[0] < .999:
+            target.yview_scroll(-int(event.delta / 120), "units")
 
     def resize_cards(self, event):
         self.canvas.itemconfigure(self.scenario_window, width=event.width)
@@ -244,7 +323,7 @@ class PositionDesk:
         self.notice.configure(wraplength=width)
         self.stop_note.configure(wraplength=width-40)
         for card in self.scenarios.winfo_children():
-            for child in card.winfo_children():
+            for child in [card, *card.winfo_children()]:
                 if hasattr(child, "column_fraction"):
                     child.configure(wraplength=max(90, int((event.width - 38) * child.column_fraction)))
 
@@ -261,8 +340,14 @@ class PositionDesk:
         if self.capture_pending:
             return
         self.capture_pending = True
+        self.capture_message = ""
+        self.analyses = {}
+        self.health_message = "更新中 · 原预案仅供参考，实时提醒暂停"
+        if self.popup and self.popup.winfo_exists():
+            self.popup.destroy()
+        self.expire_display()
+        self.render()
         self.capture_button.configure(text="正在读取…", state="disabled")
-        self.footer.configure(text="只重读已指定文件，不采集账户、不获取行情、不下单。")
         if not self.busy:
             self.refresh()
 
@@ -270,6 +355,7 @@ class PositionDesk:
         if self.busy:
             return
         self.busy = True
+        self.read_started = time.monotonic()
         capture = self.capture_pending
         def worker():
             capture_error = None
@@ -290,10 +376,20 @@ class PositionDesk:
             self.root.after(200, self.collect)
             return
         self.busy = False
+        self.read_started = None
+        # The read already running before a user refresh cannot complete that refresh.
+        if self.capture_pending and not captured:
+            self.refresh()
+            self.root.after(200, self.collect)
+            return
+        self.health_message = ""
+        if not captured and self.capture_blocked_version is None:
+            self.capture_message = ""
         if captured:
             self.capture_pending = False
             self.capture_button.configure(text="重读数据", state="normal")
-            self.capture_message = capture_error or ("本地结构与金额校验通过，不等于券商核验" if snapshot.get("valid") else "数据未通过校验")
+            self.capture_message = capture_error or ("读取失败" if error else
+                "本地结构与金额校验通过，不等于券商核验" if snapshot.get("valid") else "数据未通过校验")
             self.footer.configure(text=self.capture_message)
             self.capture_blocked_version = (snapshot.get("version") or self.snapshot.get("version")) if capture_error or error or not snapshot.get("valid") else None
         if not error and self.capture_blocked_version is not None:
@@ -302,17 +398,22 @@ class PositionDesk:
                 analyses = {}
             elif snapshot.get("valid"):
                 self.capture_blocked_version = None
+                self.capture_message = ""
         if error:
             self.snapshot = {**self.snapshot, "valid": False,
                 "errors": ["读取失败，不能把旧数据当作当前持仓；请检查数据文件。"]}
             self.analyses = {}
+            self.references = {}
         else:
             self.snapshot, self.analyses, self.problems = snapshot, analyses, problems
+            self.references = {code: {**item, "severity": "watch"} for code, item in analyses.items()
+                               if snapshot.get("valid") and item.get("plan_valid")}
             now = now_local()
+            self.expire_display()
             self.book.reconcile(snapshot, now)
             if snapshot["valid"]:
-                self.book.apply_cost_stop_latches(list(analyses.values()), now)
-            due = self.book.due(snapshot, list(analyses.values()), now, int(self.repeat.get()))
+                self.book.apply_cost_stop_latches(list(self.analyses.values()), now)
+            due = self.book.due(snapshot, list(self.analyses.values()), now, int(self.repeat.get()))
             if due:
                 self.alert(due)
         active = {(x["code"], x["fingerprint"]) for x in self.analyses.values()
@@ -329,6 +430,42 @@ class PositionDesk:
         self.refresh()
         self.root.after(60000, self.poll)
 
+    def expire_display(self):
+        if not self.snapshot.get("valid"):
+            self.analyses.clear()
+            self.references.clear()
+            return
+        now = self.snapshot.get("clock") if self.source.demo else now_local()
+        try:
+            if (stamp(self.snapshot["captured_at"]).date() != now.date()
+                    or date.fromisoformat(self.snapshot["bundle"]["target_date"]) < now.date()):
+                raise ValueError("日期已过期，请更新本地数据")
+        except (ValueError, KeyError, TypeError) as exc:
+            self.snapshot.update(valid=False, errors=[str(exc)])
+            self.analyses.clear()
+            self.references.clear()
+        for code, item in list(self.analyses.items()):
+            try:
+                at = stamp(item["quote_at"])
+                if (at.date() != now.date() or at > now + timedelta(seconds=30)
+                        or in_session(now) and (now-at).total_seconds() > 180):
+                    raise ValueError()
+            except (ValueError, KeyError, TypeError):
+                self.analyses.pop(code, None)
+                self.health_message = "行情过期，实时提醒暂停；原预案仅供参考"
+        if self.busy and self.read_started is not None and time.monotonic()-self.read_started > 25:
+            self.analyses.clear()
+            self.health_message = "读取超时，实时提醒暂停；原预案仅供参考"
+        if not self.analyses and self.popup and self.popup.winfo_exists():
+            self.popup.destroy()
+
+    def health_tick(self):
+        before = (self.snapshot.get("valid"), set(self.analyses), self.health_message)
+        self.expire_display()
+        if before != (self.snapshot.get("valid"), set(self.analyses), self.health_message):
+            self.render()
+        self.root.after(1000, self.health_tick)
+
     def render(self):
         valid = self.snapshot.get("valid", False)
         rows = self.snapshot.get("rows", []) if valid else []
@@ -343,8 +480,9 @@ class PositionDesk:
         if row:
             self.selection.set(f"{row['code']} {row['name']}")
         captured = str(self.snapshot.get("captured_at", "未知")).replace("T", " ")[:16]
-        self.status_label.configure(text="文件 " + captured + (" · 校验通过" if valid else " · 待更新"))
-        errors = self.snapshot.get("errors", []) + self.problems
+        status = " · 更新中（原快照）" if self.capture_pending else " · 校验通过" if valid else " · 待更新"
+        self.status_label.configure(text="文件 " + captured + status)
+        errors = ([self.health_message] if self.health_message else []) + self.snapshot.get("errors", []) + self.problems
         notice = errors[0] if errors else ("虚构价格与预案，只演示界面；不弹交易提醒。" if self.source.demo
                 else ("导入文件为空仓，不代表券商核验；已结束对应提醒。" if not rows else "名称和价格仅作文件内一致性检查，请核对实际账户。"))
         self.notice.configure(text=notice)
@@ -353,23 +491,26 @@ class PositionDesk:
         else:
             self.notice.pack_forget()
         self.render_card()
+        self.footer.configure(text=(self.capture_message or self.health_message or "每60秒重读本地数据 · 不联网，不下单"))
 
     def render_card(self):
         valid = self.snapshot.get("valid", False)
         row = next((r for r in self.snapshot.get("rows", []) if valid and str(r["code"]) == self.selected), None)
-        item = self.analyses.get(self.selected) if valid else None
+        live = self.analyses.get(self.selected) if valid and not self.capture_pending else None
+        item = (live or self.references.get(self.selected)) if valid else None
         self.stock_title.configure(text=row["name"] if row else ("导入空仓" if valid else "数据待更新"))
         self.stock_code.configure(text=str(row["code"]) if row else "不以历史记录代替当前持仓")
         values = (f"{int(row['quantity'])} / {int(row['sellable_quantity'])}", f"{row['cost_price']:.4f}",
-                  f"{item['price']:.2f}" if item else "待核验") if row else ("--", "--", "--")
+                  f"{live['price']:.2f}" if live else "待核验") if row else ("--", "--", "--")
         for widget, value in zip(self.metric_values, values):
             widget.configure(text=value, fg=INK)
         self.pnl_label.configure(text="")
         if item:
             self.stop_heading.configure(text=f"自定 · 成本 -{item['stop_loss_pct']:g}%")
-            color = RED if item["pnl"] > 0 else GREEN if item["pnl"] < 0 else MUTED
-            self.metric_values[2].configure(fg=color)
-            self.pnl_label.configure(text=f"{item['pnl']:+.2f}元 / {(item['price']/item['cost']-1)*100:+.2f}%", fg=color)
+            if live:
+                color = RED if item["pnl"] > 0 else GREEN if item["pnl"] < 0 else MUTED
+                self.metric_values[2].configure(fg=color)
+                self.pnl_label.configure(text=f"{item['pnl']:+.2f}元 / {(item['price']/item['cost']-1)*100:+.2f}%", fg=color)
             reference_date = str(item.get("reference_date", ""))
             reference = item.get("reference_close")
             stop_change = level_percent(item["cost_stop"], reference)
@@ -380,10 +521,11 @@ class PositionDesk:
                 fg=PERCENT_COLORS[percent_tag(stop_change)] if len(reference_date) == 8 else MUTED)
             self.percent_basis.configure(text=f"较{reference_date[4:6]}/{reference_date[6:8]}收{reference:.2f}"
                 if reference and len(reference_date) == 8 else "涨幅基准待核")
-            self.stop_state.configure(text=("已触发" if item["severity"] == "risk" else "未触发") + f" · 距离 {item['distance']:+.2f}",
+            self.stop_state.configure(text=(("已触发" if item["severity"] == "risk" else "未触发") + f" · 距离 {item['distance']:+.2f}") if live else "待更新 · 暂不判断触发",
                                       fg=GREEN if item["severity"] == "risk" else AMBER)
             self.stop_note.configure(text=f"成本 {item['cost']:.4f} × (1-{item['stop_loss_pct']:g}%) · 触发价不是成交保证 · 估算亏损 {abs(item['loss_at_stop']):.2f}元（未计卖出费用）")
-            self.plan_date.configure(text=("演示计划 " if self.source.demo else "适用日期 ") + item["target_day"][5:].replace("-", "/"))
+            prefix = "原预案 " if self.capture_pending else "演示计划 " if self.source.demo else "适用日期 "
+            self.plan_date.configure(text=prefix + item["target_day"][5:].replace("-", "/"))
         else:
             self.stop_heading.configure(text="自定提醒线")
             self.stop_value.configure(text="--", fg=MUTED)
@@ -395,11 +537,11 @@ class PositionDesk:
         plan = item.get("specific", {}) if item else {}
         self.conclusion.configure(text=plan.get("short_conclusion", plan.get("conclusion", item.get("plan_problem", "") if item else "先导入有效数据，再显示对应预案。")))
         previous_scroll = self.canvas.yview()[0]
+        previous_nav_scroll = self.nav_canvas.yview()[0]
         for child in self.scenarios.winfo_children():
             child.destroy()
         scenarios = plan.get("scenarios", [])
-        for index in range(len(self.scenario_buttons)):
-            self.scenario_nav.columnconfigure(index, weight=0, minsize=0, uniform="")
+        self.scenario_nav.columnconfigure(0, weight=1)
         for child in self.scenario_nav.winfo_children():
             child.destroy()
         self.scenario_buttons = []
@@ -415,13 +557,13 @@ class PositionDesk:
             selected = next((s for s in scenarios if s["title"] == selected_title), default)
             self.scenario_selection[self.selected] = selected["title"]
             for index, scenario in enumerate(scenarios):
-                self.scenario_nav.columnconfigure(index, weight=1, uniform="choice")
                 active = scenario is selected
                 button = tk.Button(self.scenario_nav, text=scenario.get("short_title", scenario["title"]),
                     command=lambda s=scenario: self.select_scenario(s["title"]), relief="flat", bd=0,
-                    padx=4, pady=10, bg=INK if active else "#e9edf2", fg=WHITE if active else INK,
+                    padx=8, pady=8, anchor="w", justify="left", wraplength=102,
+                    bg=INK if active else "#e9edf2", fg=WHITE if active else INK,
                     font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2")
-                button.grid(row=0, column=index, sticky="ew", padx=(0, 4 if index < len(scenarios)-1 else 0))
+                button.grid(row=index, column=0, sticky="ew", pady=(0, 5))
                 self.scenario_buttons.append(button)
             card = tk.Frame(self.scenarios, bg=WHITE, padx=16, pady=12, highlightthickness=1, highlightbackground=LINE)
             card.pack(fill="x")
@@ -431,7 +573,7 @@ class PositionDesk:
                     widget = PercentText(card, text, size, color, bold)
                 else:
                     widget = self.label(card, text, size, color, bold, anchor="w", justify="left",
-                        wraplength=max(420, self.canvas.winfo_width()-38))
+                        wraplength=max(180, self.canvas.winfo_width()-38))
                     widget.column_fraction = 1.0
                 widget.pack(fill="x", pady=(0, gap))
                 return widget
@@ -439,28 +581,28 @@ class PositionDesk:
                 paragraph("已触及自定提醒线 · 先核对可卖", 12, GREEN, True)
             # Direction belongs to the authored scenario, not its title or selection state.
             tone = selected.get("tone")
-            self.action_context = paragraph(SCENARIO_LABELS.get(tone, "情景预案") + " · " +
-                "需盘中确认", 10, SCENARIO_COLORS.get(tone, MUTED))
             action_color = RED if tone == "positive" else INK
             view = quick_view(selected)
+            self.action_context = paragraph(view.get("outlook", "") if view else "", 11, SCENARIO_COLORS.get(tone, MUTED))
             if view:
                 priced = lambda text: annotate_levels(text, plan.get("price_levels"), item.get("reference_close"))
-                self.action_title = paragraph(priced(view["action"]), 23, action_color, True, 8)
-                paragraph("以下条件同时满足", 9, MUTED, gap=5)
+                self.action_title = paragraph(priced(view["action"]), 21, action_color, True, 8)
+                paragraph("若以下条件同时出现", 10, MUTED, gap=5)
                 self.action_trigger = paragraph(priced("\n".join(view["conditions"])), 13, INK, False, 8)
                 self.action_body = paragraph(priced(view["otherwise"]), 11, INK, False, 10)
             else:
                 self.action_title = paragraph("简版待核验", 23, MUTED, True, 12)
-                self.action_trigger = paragraph("请查看完整条件，不按标题直接操作。", 12, MUTED)
+                self.action_trigger = paragraph("缺少完整操作条件，暂不显示结论。", 12, MUTED)
                 self.action_body = paragraph("", 11)
-            paragraph(f"≤ {item['cost_stop']:.2f}({level_percent(item['cost_stop'], item.get('reference_close'))}) 止损优先 · 核对可卖", 10, AMBER, gap=8)
-            self.scenario_detail_button = self.button(card, "完整分析", lambda s=selected: self.show_scenario(s))
-            self.scenario_detail_button.configure(pady=3, padx=10, font=("Microsoft YaHei UI", 10))
-            self.scenario_detail_button.pack(anchor="w")
+            availability = "原预案仅供参考；持仓与可卖数量更新中" if self.capture_pending else f"导入可卖{int(row['sellable_quantity'])}股；操作前核对实际数量"
+            paragraph(availability, 9, MUTED, gap=0)
         if not scenarios:
-            self.label(self.scenarios, "分析待更新 · 暂无有效预案", 11, MUTED,
-                anchor="w", justify="left", wraplength=430, pady=18).pack(fill="x")
+            empty = self.label(self.scenarios, "分析待更新 · 暂无有效预案", 11, MUTED,
+                anchor="w", justify="left", wraplength=max(180, self.canvas.winfo_width()-38), pady=18)
+            empty.column_fraction = 1.0
+            empty.pack(fill="x")
         self.canvas.yview_moveto(previous_scroll)
+        self.nav_canvas.yview_moveto(previous_nav_scroll)
 
     def text_dialog(self, title, text):
         window = tk.Toplevel(self.root)
@@ -472,31 +614,17 @@ class PositionDesk:
         panel.pack(fill="both", expand=True)
         window.content_panel = panel
         content = tk.Text(panel, wrap="word", bg=PAPER, fg=INK, relief="flat", padx=6, spacing3=10)
-        scroll = ttk.Scrollbar(panel, command=content.yview)
+        scroll = SlimScroll(panel, content)
         content.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
         content.pack(side="left", fill="both", expand=True)
         content.insert("1.0", text)
         color_percentages(content, text)
         content.configure(state="disabled")
         return window
 
-    def show_scenario(self, scenario):
-        self.text_dialog(scenario["title"], "成立条件\n" + scenario["trigger"] + "\n\n具体应对\n" + scenario["action"] + "\n\n为什么\n" + scenario["reason"] + "\n\n这是条件预案，不代表盘中条件已经发生。")
-
-    def show_details(self):
-        item = self.analyses.get(self.selected, {}) if self.snapshot.get("valid") else {}
-        plan = item.get("specific", {})
-        text = "分析依据截至：" + str(item.get("analysis_asof") or "待更新")
-        text += "\n行情时间：" + str(item.get("quote_at", "未核验"))
-        text += "\n\n总体判断\n" + plan.get("conclusion", "待核验")
-        text += "\n\n成本纪律\n" + self.stop_note.cget("text")
-        text += "\n\n价位涨跌幅\n" + self.percent_basis.cget("text") + "；(目标价 / 基准收盘价 - 1) × 100%。\n这是目标价对应的涨跌幅，不是预测；与成本盈亏和自定提醒比例分开。"
-        for title, key in (("逐股判断依据", "facts"), ("仍待确认", "unknowns"), ("数据来源", "sources")):
-            text += "\n\n" + title + "\n" + "\n\n".join(plan.get(key, ["未核验，不推断。 "]))
-        text += "\n\n每60秒重读指定文件，不联网、不生成分析。预案由用户提供，数值校验不代表市场判断成立；需自行核对名称、行情来源、交易日历及除权变化。持仓、成本、提醒比例或适用日变化后旧计划失效。"
-        text += "\n\n提醒记录\n" + "\n".join(e["at"][5:16].replace("T", " ") + "  " + e["text"] for e in self.book.state["events"][:12])
-        window = self.text_dialog("分析依据与提醒设置", text)
+    def show_settings(self):
+        window = self.text_dialog("提醒设置", "本应用只读本地文件，不采集账户、不下单。\n\n"
+            "最小化后继续检查，退出后停止。成本纪律和情景由输入文件提供；设置不会修改原文件。")
         bar = tk.Frame(window, bg=PAPER, padx=22, pady=12)
         window.content_panel.pack_forget()
         bar.pack(side="bottom", fill="x")
@@ -519,7 +647,7 @@ class PositionDesk:
 
     def toggle_compact(self):
         self.compact = not self.compact
-        self.root.geometry(f"560x{min(880, self.full_height)}" if self.compact else f"800x{self.full_height}")
+        self.root.geometry(f"560x{min(760, self.full_height)}" if self.compact else f"800x{self.full_height}")
         self.compact_button.configure(text="展开" if self.compact else "小窗")
 
     def options_changed(self):
@@ -534,6 +662,8 @@ class PositionDesk:
         self.save()
 
     def alert(self, items):
+        if self.capture_pending:
+            return
         if self.popup and self.popup.winfo_exists():
             self.popup.destroy()
         self.popup_keys = {(x["code"], x["fingerprint"]) for x in items}

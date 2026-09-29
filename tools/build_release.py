@@ -16,7 +16,7 @@ FILES = (
     "docs/data-format.md", "docs/demo.jpg", "tests/test_core.py", "tests/test_ui.py",
     "tests/test_release.py", "tools/build_release.py",
     "SKILL.md", "agents/openai.yaml", "scripts/inspect_positions.py",
-    "docs/quick-demo.md", "tests/test_skill.py",
+    "docs/quick-demo.md", "tests/test_skill.py", "CHANGELOG.md",
 )
 PATTERNS = {
     "personal Windows path": r"[A-Za-z]:[\\/]Users[\\/][A-Za-z0-9_. -]+[\\/]",
